@@ -1537,41 +1537,53 @@
       font-size: 0.92rem;
     }
 
-    .citation-panel {
-      padding: 22px;
-      background: #ffffff;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      box-shadow: var(--shadow);
-    }
-
-    .citation-panel h3 {
-      margin: 0 0 10px;
-      font-family: var(--display);
-      font-size: 1.4rem;
-      line-height: 1.05;
-    }
-
-    .citation-panel p {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }
-
-    .citation-box {
+    .bibtex-box {
+      position: relative;
       overflow-x: auto;
-      margin: 16px 0 0;
-      padding: 16px;
-      color: #f8faf7;
-      background: #0f172a;
-      border-radius: 14px;
+      margin-top: 18px;
+      padding: 22px 24px;
+      color: #94a3b8;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      box-shadow: 0 18px 44px rgba(15, 23, 42, 0.16);
     }
 
-    .citation-box code {
+    .bibtex-box pre {
+      margin: 0;
+    }
+
+    .bibtex-box code {
       font-family: var(--mono);
-      font-size: 0.74rem;
-      line-height: 1.55;
+      font-size: 0.82rem;
+      line-height: 1.6;
       white-space: pre;
+    }
+
+    .copy-btn {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      padding: 6px 14px;
+      color: #a5b4fc;
+      background: rgba(124, 58, 237, 0.20);
+      border: 1px solid rgba(124, 58, 237, 0.30);
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+    }
+
+    .copy-btn:hover {
+      background: rgba(124, 58, 237, 0.35);
+    }
+
+    .copy-btn.copied {
+      color: #86efac;
+      background: rgba(34, 197, 94, 0.20);
+      border-color: rgba(34, 197, 94, 0.30);
     }
 
     .footer {
@@ -2399,26 +2411,25 @@
 
     <section class="section" id="citation">
       <div class="section-header">
-        <div class="section-eyebrow">07 / Citation</div>
+        <div class="section-eyebrow">07 / BibTeX</div>
         <div>
           <h2>Citation.</h2>
           <p class="section-lede">
-            The final paper link and BibTeX will be updated when the preprint is available.
+            Placeholder BibTeX. The final paper link and camera-ready citation will be updated when available.
           </p>
         </div>
       </div>
 
-      <article class="citation-panel">
-        <h3>BibTeX placeholder</h3>
-        <p>Use this placeholder until the camera-ready citation is available.</p>
-        <pre class="citation-box"><code>@misc{skillopt2026,
-  title = {SkillOpt: Executive Strategy for Self-Evolving Agent Skills},
+      <div class="bibtex-box">
+        <button class="copy-btn" type="button" onclick="copyBibtex(this)">Copy</button>
+        <pre><code>@misc{skillopt2026,
+  title  = {SkillOpt: Executive Strategy for Self-Evolving Agent Skills},
   author = {SkillOpt Authors},
-  year = {2026},
-  note = {Preprint forthcoming},
-  url = {https://microsoft.github.io/SkillOpt/}
+  year   = {2026},
+  note   = {Preprint forthcoming},
+  url    = {https://microsoft.github.io/SkillOpt/}
 }</code></pre>
-      </article>
+      </div>
     </section>
 
     <footer class="footer">
@@ -2449,7 +2460,7 @@
         ".evolution-footnotes",
         ".transfer-grid",
         ".callout",
-        ".citation-panel"
+        ".bibtex-box"
       ].join(",");
       const revealNodes = Array.from(document.querySelectorAll(revealSelector));
       revealNodes.forEach((node) => node.classList.add("reveal"));
@@ -2467,6 +2478,19 @@
         revealNodes.forEach((node) => node.classList.add("visible"));
       }
     })();
+
+    function copyBibtex(btn) {
+      const box = btn.closest(".bibtex-box");
+      const text = box ? box.querySelector("code").textContent : "";
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = "Copied!";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = "Copy";
+          btn.classList.remove("copied");
+        }, 2000);
+      });
+    }
 
     const methodComparison = {
       methods: [
