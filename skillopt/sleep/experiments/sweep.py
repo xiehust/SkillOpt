@@ -49,13 +49,16 @@ PLANS: Dict[str, List[Dict[str, Any]]] = {
         _direct_cfg("codex", "", "brief-writer", 2),
     ],
     # SkillOpt-faithful: STRONG optimizer (sonnet) proposes, WEAK target (haiku)
-    # runs — the reliable config. Plus Codex self-optimized.
+    # runs — the reliable config. Plus Codex self-optimized. All 4 gbrain seeds,
+    # including quick-answerer (real tool loop).
     "direct": [
         _dual_cfg("claude", "sonnet", "claude", "haiku", "brief-writer"),
         _dual_cfg("claude", "sonnet", "claude", "haiku", "advisor"),
         _dual_cfg("claude", "sonnet", "claude", "haiku", "thorough-analyst"),
+        _dual_cfg("claude", "sonnet", "claude", "haiku", "quick-answerer"),
         _direct_cfg("codex", "", "brief-writer"),
         _direct_cfg("codex", "", "advisor"),
+        _direct_cfg("codex", "", "quick-answerer"),
     ],
     # the price-difference story: optimize cheap, deploy expensive (and reverse)
     "transfer": [
