@@ -138,6 +138,20 @@ ALFWorld:
 `searchqa_id_split/` is an ID-only manifest. Each released `id` exactly matches
 the `key` field in `lucadiliello/searchqa`.
 
+To materialize the runnable SearchQA split used by
+`configs/searchqa/default.yaml`, install the optional dependency and run:
+
+```bash
+python -m pip install 'skillopt[searchqa]'
+python scripts/materialize_searchqa.py
+```
+
+This writes full examples to:
+
+```text
+data/searchqa_split
+```
+
 Materialized examples must include the fields consumed by the SearchQA
 environment, including:
 
