@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from skillopt_sleep.types import SessionDigest
@@ -150,7 +151,6 @@ def _is_headless_replay(digest: "SessionDigest") -> bool:
     # Sub-3-second single-turn sessions are almost certainly programmatic.
     if digest.started_at and digest.ended_at:
         try:
-            from datetime import datetime
             fmt = "%Y-%m-%dT%H:%M:%S"
             start = datetime.strptime(digest.started_at[:19], fmt)
             end = datetime.strptime(digest.ended_at[:19], fmt)

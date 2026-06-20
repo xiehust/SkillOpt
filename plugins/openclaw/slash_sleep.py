@@ -214,9 +214,10 @@ def schedule_cmd(hour: int, minute: int) -> int:
     except ImportError:
         print("ERROR: skillopt_sleep.scheduler not available — is SkillOpt-Sleep installed?")
         return 1
-    result = schedule(hour=hour, minute=minute)
-    print(result)
-    return 0
+    project = str(SKILL_DIR)
+    ok, msg = schedule(project, hour=hour, minute=minute)
+    print(msg)
+    return 0 if ok else 1
 
 
 def unschedule_cmd(all_projects: bool) -> int:
@@ -226,9 +227,10 @@ def unschedule_cmd(all_projects: bool) -> int:
     except ImportError:
         print("ERROR: skillopt_sleep.scheduler not available — is SkillOpt-Sleep installed?")
         return 1
-    result = unschedule(all_projects=all_projects)
-    print(result)
-    return 0
+    project = str(SKILL_DIR)
+    ok, msg = unschedule(project, all_projects=all_projects)
+    print(msg)
+    return 0 if ok else 1
 
 
 def cost() -> int:
@@ -291,7 +293,7 @@ def main():
     sub.add_parser("cost", help="estimate cost")
     p_schedule = sub.add_parser("schedule", help="install nightly cron entry")
     p_schedule.add_argument("--hour", type=int, default=3, help="hour (0-23)")
-    p_schedule.add_argument("--minute", type=int, default=0, help="minute (0-59)")
+    p_schedule.add_argument("--minute", type=int, default=17, help="minute (0-59)")
     p_unschedule = sub.add_parser("unschedule", help="remove cron entry")
     p_unschedule.add_argument("--all", dest="all_projects", action="store_true",
                                help="remove entries for all projects")
