@@ -10,13 +10,17 @@ once on malformed output, and never raises: unjudgeable results surface as
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterable
 
 from skillopt.model import chat_optimizer
 
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict evaluator for agent task outputs. You are given a task, "
     "an acceptance rubric, the agent's final response, and a listing of files "
-    "the agent produced. Judge ONLY against the rubric. Reply with ONLY a JSON "
+    "the agent produced (with the contents of produced text files, possibly "
+    "truncated). Judge ONLY against the rubric, and only credit criteria the "
+    "provided evidence verifies. Reply with ONLY a JSON "
     'object, no prose: {"pass": true|false, "score": <float 0.0-1.0>, '
     '"reason": "<short justification>"}. "pass" means the rubric is fully '
     'satisfied; "score" is partial credit toward the rubric.'
@@ -103,6 +107,106 @@ def _build_judge_user_prompt(item: dict, response: str, artifacts_listing: str) 
         f"## Agent response\n{response}",
         f"## Files produced in the workspace\n{artifacts_listing or '(none)'}",
     ])
+
+
+def artifacts_listing(work_dir: str) -> str:
+    """List files the agent left in *work_dir* (relative path + size).
+
+    Harness-internal files (hidden dirs, the task prompt) are skipped so the
+    judge only sees artifacts the agent actually produced.
+    """
+    if not work_dir or not os.path.isdir(work_dir):
+        return ""
+    lines = []
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, work_dir)
+            if rel.startswith((".agents", ".claude")) or rel == "task.md":
+                continue
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = 0
+            lines.append(f"{rel} ({size} bytes)")
+    return "\n".join(lines)
+
+
+def artifacts_excerpts(
+    work_dir: str,
+    exclude_rel: Iterable[str] = (),
+    *,
+    per_file_chars: int = 2000,
+    max_files: int = 8,
+    max_total_chars: int = 10000,
+) -> str:
+    """Contents of agent-produced text files, for the judge's evidence.
+
+    A rubric usually constrains what the agent *writes*, not just that a file
+    exists — a judge that only sees a name/size listing cannot verify those
+    criteria and will (correctly) refuse to credit them. Walks *work_dir* with
+    the same skips as ``artifacts_listing``, additionally excluding
+    *exclude_rel* (task-seeded input files) and binary files. Truncation is
+    always marked, never silent.
+    """
+    if not work_dir or not os.path.isdir(work_dir):
+        return ""
+    excluded = {os.path.normpath(str(rel)) for rel in (exclude_rel or ())}
+    blocks: list[str] = []
+    total = 0
+    skipped = 0
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, work_dir)
+            if rel.startswith((".agents", ".claude")) or rel == "task.md":
+                continue
+            if os.path.normpath(rel) in excluded:
+                continue
+            if len(blocks) >= max_files or total >= max_total_chars:
+                skipped += 1
+                continue
+            try:
+                with open(full, "rb") as f:
+                    raw = f.read(per_file_chars * 4)
+                size = os.path.getsize(full)
+            except OSError:
+                continue
+            if b"\x00" in raw:
+                continue  # binary — the listing still shows it
+            decoded = raw.decode("utf-8", errors="replace")
+            text = decoded[:per_file_chars][: max(0, max_total_chars - total)]
+            header = f"--- {rel}"
+            if len(raw) < size or len(text) < len(decoded):
+                header += f" (truncated: first {len(text)} chars of {size} bytes)"
+            header += " ---"
+            blocks.append(f"{header}\n{text}")
+            total += len(text)
+    if skipped:
+        blocks.append(f"... {skipped} more file(s) not shown")
+    return "\n\n".join(blocks)
+
+
+def merge_scores(items: list[dict], rollout_results: list[dict], judge_fn) -> list[dict]:
+    """Merge rollout results with judge verdicts; errored tasks skip the judge."""
+    merged = []
+    for item, rollout_result in zip(items, rollout_results):
+        result = dict(rollout_result)
+        if result.get("error"):
+            result.update({"hard": 0, "soft": 0.0, "judge_reason": ""})
+        else:
+            work_dir = result.get("work_dir", "")
+            listing = artifacts_listing(work_dir)
+            excerpts = artifacts_excerpts(work_dir, exclude_rel=(item.get("files") or {}).keys())
+            if excerpts:
+                listing = (f"{listing}\n\n"
+                           f"Contents of agent-produced text files:\n{excerpts}")
+            verdict = judge_fn(item, result.get("response", ""), listing)
+            result.update(verdict)
+        merged.append(result)
+    return merged
 
 
 def judge(item: dict, response: str, artifacts_listing: str = "") -> dict:

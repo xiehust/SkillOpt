@@ -80,7 +80,10 @@ For each task (thread pool, `--workers`):
    and any `files` seeded alongside.
 2. Drives Claude Code CLI in that directory (per-task `--timeout`).
 3. The judge model reads the question, the rubric, the agent's response,
-   and a listing of files the agent produced, then returns a JSON verdict
+   and the files the agent produced — a name/size listing plus the contents
+   of produced text files (task-seeded inputs and binary files excluded,
+   truncation always marked), so rubric criteria about what a file must
+   *contain* are verifiable. It returns a JSON verdict
    `{"pass": bool, "score": 0-1, "reason": str}`.
 
 A task that crashes or times out never aborts the batch — it is scored 0,
@@ -101,13 +104,39 @@ satisfied) and `soft` (0–1 partial credit) — the same signal the trainer
 consumes, so a task set built for evaluation can later drive skill
 optimization unchanged.
 
+## Optimizing a skill against the same task set
+
+The skilleval env is registered with the trainer, so a task set built for
+evaluation can drive skill optimization unchanged. Split the tasks into
+`train/ val/ test/` directories (one JSON array per split, same schema),
+point a config at them, and run:
+
+```bash
+python3 scripts/train.py --config configs/skilleval/default.yaml \
+    --out_root outputs/my_skill_opt
+```
+
+`configs/skilleval/default.yaml` shows the small-budget defaults: exec
+target (Claude Code) for rollouts, chat judge/optimizer, gate on the val
+split. During reflection the optimizer sees each task's rubric as hidden
+reference material plus the judge's verdict, so failed rubric criteria
+become skill edits. The trained artifact is `best_skill.md` under
+`out_root`; re-run `evaluate_skill.py` with it to confirm the lift.
+
+Multi-file skills train too: set `env.skill_dir` to the skill directory
+(see `configs/skilleval/logtriage.yaml`). Only `SKILL.md` — pointed to by
+`skill_init` — is the trainable state; every other file under `skill_dir`
+(scripts/, references/, ...) is frozen and copied into each rollout
+workspace unchanged. To deploy the result, copy the skill directory and
+replace its `SKILL.md` with `best_skill.md`.
+
 ## Current limitations
 
 The minimal version deliberately leaves out (see the design spec's
 里程碑之后 section for the planned path):
 
-- **No baseline comparison** — it does not run a no-skill control group.
-- **No improvement suggestions** — failures are reported, not reflected on.
-- **No train.py integration** — the env is not registered as an adapter
-  yet; the task format is already compatible.
+- **No baseline comparison flag** — run `evaluate_skill.py` twice (with and
+  without the skill) to compare manually.
+- **No improvement suggestions in eval reports** — for reflection-driven
+  edits, use the training path above.
 - **Token usage** is reported as `n/a` (durations are tracked).

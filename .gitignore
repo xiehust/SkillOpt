@@ -21,6 +21,7 @@ data/*
 !data/alfworld_path_split/**
 !data/skilleval_demo/
 !data/skilleval_demo/**
+data/skilleval_demo/**/__pycache__/
 outputs/
 logs/
 external/

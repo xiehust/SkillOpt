@@ -26,6 +26,32 @@ GUIDE_PROMPT = (
 # where prepare_workspace installs the skill inside each work_dir
 SKILL_INSTALL_DIR = os.path.join(".agents", "skills", "skillopt-target")
 
+_SKIP_DIRS = {"__pycache__", "node_modules", ".git"}
+
+
+def collect_support_files(skill_dir: str) -> list[tuple[str, str]]:
+    """Return a skill directory's supporting files for ``run_batch(skill_files=...)``.
+
+    Walks *skill_dir* and returns every regular file except ``SKILL.md`` as an
+    ``(absolute src, path relative to the skill dir)`` pair. Hidden entries and
+    tooling caches are skipped; symlinks are not followed (a task workspace
+    must never be able to reach back into the source skill).
+    """
+    if not os.path.isdir(skill_dir):
+        raise ValueError(f"skill_dir is not a directory: {skill_dir}")
+    support: list[tuple[str, str]] = []
+    for root, dirs, files in os.walk(skill_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS]
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, skill_dir)
+            if rel == "SKILL.md" or os.path.islink(full):
+                continue
+            support.append((os.path.abspath(full), rel))
+    return support
+
 
 def _rollout_one(
     item: dict,

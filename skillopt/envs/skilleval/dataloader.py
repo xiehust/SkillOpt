@@ -18,7 +18,7 @@ Task item schema::
 """
 from __future__ import annotations
 
-from skillopt.datasets.base import _load_json_or_jsonl
+from skillopt.datasets.base import SplitDataLoader, _load_json_or_jsonl
 
 _REQUIRED_FIELDS = ("id", "question", "rubric")
 _DEFAULT_TASK_TYPE = "default"
@@ -60,21 +60,10 @@ def _validate_files(index: int, item: dict) -> dict:
     return dict(files)
 
 
-def load_tasks(path: str, limit: int = 0) -> list[dict]:
-    """Load and validate a skilleval task file (JSON array or JSONL).
-
-    The entire file is validated before any slicing so a corrupt item fails
-    the run deterministically regardless of ``limit``.
-
-    Raises
-    ------
-    ValueError
-        On any missing/empty required field, duplicate id, unsafe id, or
-        non-str ``files`` value.  The message names the offending item.
-    """
-    raw_items = _load_json_or_jsonl(path)
+def _normalize_items(raw_items: list, source: str) -> list[dict]:
+    """Validate and normalize raw task items (shared by file and split loading)."""
     if not isinstance(raw_items, list) or not raw_items:
-        raise ValueError(f"No task items found in {path}")
+        raise ValueError(f"No task items found in {source}")
 
     tasks: list[dict] = []
     seen_ids: set[str] = set()
@@ -101,7 +90,38 @@ def load_tasks(path: str, limit: int = 0) -> list[dict]:
         normalized["files"] = _validate_files(index, item)
         normalized["task_type"] = str(item.get("task_type") or _DEFAULT_TASK_TYPE)
         tasks.append(normalized)
+    return tasks
 
+
+def load_tasks(path: str, limit: int = 0) -> list[dict]:
+    """Load and validate a skilleval task file (JSON array or JSONL).
+
+    The entire file is validated before any slicing so a corrupt item fails
+    the run deterministically regardless of ``limit``.
+
+    Raises
+    ------
+    ValueError
+        On any missing/empty required field, duplicate id, unsafe id, or
+        non-str ``files`` value.  The message names the offending item.
+    """
+    tasks = _normalize_items(_load_json_or_jsonl(path), path)
     if limit and limit > 0:
         tasks = tasks[:limit]
     return tasks
+
+
+class SkillEvalDataLoader(SplitDataLoader):
+    """Split-based task loading for training on skilleval task sets.
+
+    Each split directory (train/, val/, test/) holds one JSON array of task
+    items with the same schema (and the same fail-fast validation) as the
+    single-file evaluation path.
+    """
+
+    def load_raw_items(self, data_path: str) -> list[dict]:
+        return _normalize_items(_load_json_or_jsonl(data_path), data_path)
+
+    def load_split_items(self, split_path: str) -> list[dict]:
+        items = super().load_split_items(split_path)
+        return _normalize_items(items, split_path)

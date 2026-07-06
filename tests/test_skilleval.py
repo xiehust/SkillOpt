@@ -566,3 +566,230 @@ class TestCollectSkill:
         (skill / "link.txt").symlink_to(outside)
         _content, files = evaluate_skill._collect_skill(str(skill))
         assert "link.txt" not in [rel for _src, rel in files]
+
+
+# ── Training adapter ──────────────────────────────────────────────────────
+
+from skillopt.envs.skilleval import adapter as adapter_mod  # noqa: E402
+from skillopt.envs.skilleval.adapter import SkillEvalAdapter  # noqa: E402
+from skillopt.envs.skilleval.dataloader import SkillEvalDataLoader  # noqa: E402
+
+
+def _make_split_dir(tmp_path, counts=(2, 1, 1)):
+    split = tmp_path / "split"
+    idx = 0
+    for name, n in zip(("train", "val", "test"), counts):
+        d = split / name
+        d.mkdir(parents=True)
+        items = [_valid_item(f"t{idx + i}") for i in range(n)]
+        idx += n
+        (d / "items.json").write_text(json.dumps(items), encoding="utf-8")
+    return str(split)
+
+
+class TestSkillEvalDataLoader:
+    def test_loads_and_validates_splits(self, tmp_path) -> None:
+        loader = SkillEvalDataLoader(split_dir=_make_split_dir(tmp_path), split_mode="split_dir")
+        loader.setup({})
+        assert len(loader.train_items) == 2
+        assert len(loader.val_items) == 1
+        assert loader.train_items[0]["task_type"] == "default"
+
+    def test_invalid_split_item_fails_fast(self, tmp_path) -> None:
+        split = tmp_path / "split"
+        for name in ("train", "val", "test"):
+            d = split / name
+            d.mkdir(parents=True)
+            (d / "items.json").write_text(json.dumps([_valid_item("x" + name)]), encoding="utf-8")
+        bad = _valid_item("bad")
+        del bad["rubric"]
+        (split / "train" / "items.json").write_text(json.dumps([bad]), encoding="utf-8")
+        loader = SkillEvalDataLoader(split_dir=str(split), split_mode="split_dir")
+        with pytest.raises(ValueError, match="rubric"):
+            loader.setup({})
+
+
+class TestSkillEvalAdapter:
+    def _adapter(self, tmp_path):
+        a = SkillEvalAdapter(split_dir=_make_split_dir(tmp_path), split_mode="split_dir")
+        a.setup({})
+        return a
+
+    def test_rollout_merges_judge_and_persists_trajectories(self, tmp_path, monkeypatch) -> None:
+        a = self._adapter(tmp_path)
+        items = a.build_train_env(batch_size=2, seed=1)
+
+        def fake_run_batch(batch_items, skill, out_dir, **kw):
+            return [
+                {"id": batch_items[0]["id"], "task_type": "default",
+                 "response": "answer A", "duration_s": 1.0, "work_dir": "/nx/a"},
+                {"id": batch_items[1]["id"], "task_type": "default",
+                 "response": "", "error": "boom", "duration_s": 0.1, "work_dir": "/nx/b"},
+            ]
+
+        def fake_judge(item, response, listing):
+            return {"id": item["id"], "hard": 1, "soft": 0.75, "judge_reason": "ok"}
+
+        monkeypatch.setattr(adapter_mod, "run_batch", fake_run_batch)
+        monkeypatch.setattr(adapter_mod, "judge", fake_judge)
+
+        out_dir = str(tmp_path / "rollout")
+        results = a.rollout(items, "# skill", out_dir)
+
+        assert results[0]["hard"] == 1 and results[0]["soft"] == 0.75
+        assert results[1]["hard"] == 0 and "error" in results[1]
+        # reflection contract: conversation.json per task + enriched fields
+        for r, item in zip(results, items):
+            conv = json.loads(
+                (tmp_path / "rollout" / "predictions" / r["id"] / "conversation.json").read_text()
+            )
+            assert conv[0]["content"] == item["question"]
+            assert "Judge verdict" in conv[2]["content"]
+        assert results[1]["fail_reason"]
+        assert results[0]["task_description"] == items[0]["question"]
+
+    def test_reference_text_exposes_rubric(self, tmp_path) -> None:
+        a = self._adapter(tmp_path)
+        ref = a.build_reference_text(_valid_item())
+        assert "rubric" in ref.lower()
+        assert "12 month rows" in ref
+
+    def test_task_types_collected(self, tmp_path) -> None:
+        a = self._adapter(tmp_path)
+        assert a.get_task_types() == ["default"]
+
+
+# ── collect_support_files + adapter skill_dir (multi-file skill training) ──
+from skillopt.envs.skilleval.rollout import collect_support_files  # noqa: E402
+
+
+def _make_skill_dir(tmp_path):
+    skill = tmp_path / "myskill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# skill", encoding="utf-8")
+    (skill / "scripts" / "run.py").write_text("print('hi')", encoding="utf-8")
+    (skill / "notes.md").write_text("notes", encoding="utf-8")
+    return skill
+
+
+class TestCollectSupportFiles:
+    def test_collects_nested_files_with_relative_paths(self, tmp_path) -> None:
+        skill = _make_skill_dir(tmp_path)
+        files = collect_support_files(str(skill))
+        rels = sorted(rel for _, rel in files)
+        assert rels == ["notes.md", os.path.join("scripts", "run.py")]
+        assert all(os.path.isabs(src) for src, _ in files)
+
+    def test_skips_skill_md_hidden_caches_and_symlinks(self, tmp_path) -> None:
+        skill = _make_skill_dir(tmp_path)
+        (skill / ".hidden").write_text("x", encoding="utf-8")
+        (skill / "__pycache__").mkdir()
+        (skill / "__pycache__" / "c.pyc").write_text("x", encoding="utf-8")
+        os.symlink(str(skill / "notes.md"), str(skill / "link.md"))
+        rels = {rel for _, rel in collect_support_files(str(skill))}
+        assert rels == {"notes.md", os.path.join("scripts", "run.py")}
+
+    def test_non_directory_raises(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="skill_dir"):
+            collect_support_files(str(tmp_path / "nx"))
+
+
+class TestSkillEvalAdapterSkillDir:
+    def test_skill_dir_files_passed_to_run_batch(self, tmp_path, monkeypatch) -> None:
+        skill = _make_skill_dir(tmp_path)
+        a = SkillEvalAdapter(
+            split_dir=_make_split_dir(tmp_path), split_mode="split_dir",
+            skill_dir=str(skill),
+        )
+        a.setup({})
+        items = a.build_train_env(batch_size=2, seed=1)
+        captured = {}
+
+        def fake_run_batch(batch_items, skill_content, out_dir, **kw):
+            captured.update(kw)
+            return [{"id": it["id"], "task_type": "default", "response": "r",
+                     "duration_s": 0.1, "work_dir": "/nx"} for it in batch_items]
+
+        monkeypatch.setattr(adapter_mod, "run_batch", fake_run_batch)
+        monkeypatch.setattr(
+            adapter_mod, "judge",
+            lambda item, response, listing: {"id": item["id"], "hard": 1, "soft": 1.0},
+        )
+        a.rollout(items, "# skill", str(tmp_path / "out"))
+        rels = sorted(rel for _, rel in captured["skill_files"])
+        assert rels == ["notes.md", os.path.join("scripts", "run.py")]
+
+    def test_no_skill_dir_passes_none(self, tmp_path) -> None:
+        a = SkillEvalAdapter(split_dir=_make_split_dir(tmp_path), split_mode="split_dir")
+        assert a.skill_files is None
+
+    def test_bad_skill_dir_fails_fast_at_construction(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="skill_dir"):
+            SkillEvalAdapter(
+                split_dir=_make_split_dir(tmp_path), split_mode="split_dir",
+                skill_dir=str(tmp_path / "nx"),
+            )
+
+
+# ── artifacts_excerpts (judge sees produced text-file contents) ───────────
+from skillopt.envs.skilleval.evaluator import artifacts_excerpts, merge_scores  # noqa: E402
+
+
+def _make_work_dir(tmp_path):
+    wd = tmp_path / "wd"
+    (wd / "triage").mkdir(parents=True)
+    (wd / "logs").mkdir()
+    (wd / ".agents" / "skills").mkdir(parents=True)
+    (wd / "task.md").write_text("the task", encoding="utf-8")
+    (wd / "logs" / "access.log").write_text("seeded input", encoding="utf-8")
+    (wd / "triage" / "report.md").write_text("# Triage\nSTATUS: OK", encoding="utf-8")
+    (wd / ".agents" / "skills" / "SKILL.md").write_text("skill", encoding="utf-8")
+    return wd
+
+
+class TestArtifactsExcerpts:
+    def test_includes_produced_text_excludes_seeded_and_internal(self, tmp_path) -> None:
+        wd = _make_work_dir(tmp_path)
+        out = artifacts_excerpts(str(wd), exclude_rel=["logs/access.log"])
+        assert "triage/report.md" in out.replace(os.sep, "/")
+        assert "STATUS: OK" in out
+        assert "seeded input" not in out
+        assert "the task" not in out
+        assert "SKILL.md" not in out
+
+    def test_binary_files_skipped(self, tmp_path) -> None:
+        wd = _make_work_dir(tmp_path)
+        (wd / "out.xlsx").write_bytes(b"PK\x03\x04\x00\x00binary")
+        out = artifacts_excerpts(str(wd))
+        assert "out.xlsx" not in out
+
+    def test_truncation_is_marked(self, tmp_path) -> None:
+        wd = _make_work_dir(tmp_path)
+        (wd / "big.md").write_text("x" * 5000, encoding="utf-8")
+        out = artifacts_excerpts(str(wd), per_file_chars=100)
+        assert "truncated: first 100 chars of 5000 bytes" in out
+
+    def test_file_cap_is_reported_not_silent(self, tmp_path) -> None:
+        wd = _make_work_dir(tmp_path)
+        for i in range(4):
+            (wd / f"f{i}.txt").write_text("hi", encoding="utf-8")
+        out = artifacts_excerpts(str(wd), max_files=2)
+        assert "more file(s) not shown" in out
+
+    def test_missing_dir_returns_empty(self, tmp_path) -> None:
+        assert artifacts_excerpts(str(tmp_path / "nx")) == ""
+
+    def test_merge_scores_feeds_contents_to_judge(self, tmp_path) -> None:
+        wd = _make_work_dir(tmp_path)
+        item = {"id": "t1", "question": "q", "rubric": "r",
+                "files": {"logs/access.log": "seeded input"}}
+        rollout = {"id": "t1", "response": "done", "work_dir": str(wd)}
+        seen = {}
+
+        def fake_judge(itm, response, listing):
+            seen["listing"] = listing
+            return {"id": itm["id"], "hard": 1, "soft": 1.0, "judge_reason": "ok"}
+
+        merge_scores([item], [rollout], fake_judge)
+        assert "STATUS: OK" in seen["listing"]
+        assert "seeded input" not in seen["listing"]

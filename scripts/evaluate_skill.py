@@ -30,8 +30,8 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from skillopt.envs.skilleval.dataloader import load_tasks
-from skillopt.envs.skilleval.evaluator import judge
-from skillopt.envs.skilleval.rollout import run_batch
+from skillopt.envs.skilleval.evaluator import artifacts_listing, judge, merge_scores  # noqa: F401 — merge_scores re-exported for tests/importers
+from skillopt.envs.skilleval.rollout import collect_support_files, run_batch
 from skillopt.model import (
     configure_claude_code_exec,
     set_optimizer_backend,
@@ -68,36 +68,19 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-_SKIP_DIRS = {"__pycache__", "node_modules", ".git"}
-
-
 def _collect_skill(path: str) -> tuple[str, list[tuple[str, str]]]:
     """Resolve --skill into (SKILL.md content, supporting files).
 
     A file path is single-file mode (no supporting files). A directory must
-    contain SKILL.md; every other regular file in it is returned as an
-    ``(absolute src, path relative to the skill dir)`` pair, skipping hidden
-    entries and tooling caches. Symlinks are not followed (an evaluation
-    workspace must never be able to reach back into the source skill).
+    contain SKILL.md; every other regular file in it is collected by
+    ``collect_support_files`` (hidden entries, tooling caches, and symlinks
+    are skipped — a workspace must never reach back into the source skill).
     """
     if os.path.isdir(path):
         skill_md_path = os.path.join(path, "SKILL.md")
         if not os.path.isfile(skill_md_path):
             sys.exit(f"error: skill directory has no SKILL.md: {path}")
-        content = _read_skill_file(skill_md_path)
-        support: list[tuple[str, str]] = []
-        for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs
-                       if not d.startswith(".") and d not in _SKIP_DIRS]
-            for name in sorted(files):
-                if name.startswith("."):
-                    continue
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, path)
-                if rel == "SKILL.md" or os.path.islink(full):
-                    continue
-                support.append((os.path.abspath(full), rel))
-        return content, support
+        return _read_skill_file(skill_md_path), collect_support_files(path)
     return _read_skill_file(path), []
 
 
@@ -109,42 +92,6 @@ def _read_skill_file(path: str) -> str:
     if not content.strip():
         sys.exit(f"error: skill file is empty: {path}")
     return content
-
-
-def _artifacts_listing(work_dir: str) -> str:
-    """List files the agent left in work_dir (relative path + size), skipping harness files."""
-    skip_prefixes = (".agents", ".claude")
-    lines = []
-    for root, dirs, files in os.walk(work_dir):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
-        for name in sorted(files):
-            full = os.path.join(root, name)
-            rel = os.path.relpath(full, work_dir)
-            if rel.startswith(skip_prefixes) or rel == "task.md":
-                continue
-            try:
-                size = os.path.getsize(full)
-            except OSError:
-                size = 0
-            lines.append(f"{rel} ({size} bytes)")
-    return "\n".join(lines)
-
-
-def merge_scores(items: list[dict], rollout_results: list[dict], judge_fn) -> list[dict]:
-    """Merge rollout results with judge verdicts; errored tasks skip the judge."""
-    merged = []
-    for item, rollout_result in zip(items, rollout_results):
-        result = dict(rollout_result)
-        if result.get("error"):
-            result.update({"hard": 0, "soft": 0.0, "judge_reason": ""})
-        else:
-            listing = _artifacts_listing(result["work_dir"]) if os.path.isdir(
-                result.get("work_dir", "")
-            ) else ""
-            verdict = judge_fn(item, result.get("response", ""), listing)
-            result.update(verdict)
-        merged.append(result)
-    return merged
 
 
 def _mean(values: list[float]) -> float:
