@@ -130,6 +130,38 @@ Multi-file skills train too: set `env.skill_dir` to the skill directory
 workspace unchanged. To deploy the result, copy the skill directory and
 replace its `SKILL.md` with `best_skill.md`.
 
+### Training documents beyond SKILL.md
+
+To let the optimizer also edit other *text* documents (reference notes,
+templates, checklists), list them in `env.trainable_files` and point
+`skill_init` at a **bundle** — a single document that joins those files and
+SKILL.md under `<!-- FILE: path -->` headers, generated with:
+
+```bash
+python3 -m skillopt.envs.skilleval.bundle build <skill_dir> \
+    --files references/report-template.md --out seed_bundle.md
+```
+
+The trainer still optimizes one string (edits, budget, gate and snapshots
+all unchanged); the adapter splits the bundle back into files inside each
+rollout workspace. SKILL.md is always the bundle's last section so that
+untargeted `append` edits keep landing in SKILL.md. Parsing is tolerant: a
+section the optimizer mangled falls back to the seed copy, and sections
+with paths outside `trainable_files` are dropped, so bundle text can never
+write outside the whitelist. The trained `best_skill.md` is a bundle;
+deploy it with:
+
+```bash
+python3 -m skillopt.envs.skilleval.bundle split out/best_skill.md \
+    --skill_dir <skill_dir> --out_dir <deploy_dir>
+```
+
+Keep the whitelist to prose documents. Scripts are better left frozen: a
+text edit that breaks syntax zeroes every task for a step (the gate
+rejects it, but the rollout budget is spent), and a working script is
+usually verified behavior, not something reflection should rewrite.
+`configs/skilleval/logtriage_multidoc.yaml` is a complete example.
+
 ## Current limitations
 
 The minimal version deliberately leaves out (see the design spec's

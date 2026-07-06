@@ -14,6 +14,7 @@ import os
 
 from skillopt.datasets.base import BatchSpec
 from skillopt.envs.base import EnvAdapter
+from skillopt.envs.skilleval.bundle import SKILL_MD, normalize_rel_path, split_bundle
 from skillopt.envs.skilleval.dataloader import SkillEvalDataLoader
 from skillopt.envs.skilleval.evaluator import artifacts_listing, judge, merge_scores
 from skillopt.envs.skilleval.rollout import collect_support_files, run_batch
@@ -40,12 +41,28 @@ class SkillEvalAdapter(EnvAdapter):
         seed: int = 42,
         limit: int = 0,
         skill_dir: str = "",
+        trainable_files: list[str] | str | None = None,
     ) -> None:
-        # For a multi-file skill: only SKILL.md (the trainable state) evolves;
-        # supporting files (scripts/, references/, ...) are frozen and copied
-        # into every rollout workspace. Collected eagerly so a bad path fails
-        # before any model call.
-        self.skill_files = collect_support_files(skill_dir) if skill_dir else None
+        # For a multi-file skill only the trainable state evolves; supporting
+        # files (scripts/, references/, ...) are frozen and copied into every
+        # rollout workspace. By default the state is SKILL.md alone; with
+        # *trainable_files* it is a bundle (see bundle.py) of SKILL.md plus
+        # those files, and the frozen set excludes them. Everything is
+        # collected/validated eagerly so a bad path fails before model calls.
+        self.trainable_files = self._normalize_trainable(trainable_files)
+        if self.trainable_files and not skill_dir:
+            raise ValueError("trainable_files requires skill_dir")
+        support = collect_support_files(skill_dir) if skill_dir else []
+        self._seed_docs: dict[str, str] = {}
+        self._seed_skill_md = ""
+        if self.trainable_files:
+            trainable = set(self.trainable_files)
+            support = [(src, rel) for src, rel in support
+                       if normalize_rel_path(rel) not in trainable]
+            for rel in self.trainable_files:
+                self._seed_docs[rel] = self._read_seed(skill_dir, rel)
+            self._seed_skill_md = self._read_seed(skill_dir, SKILL_MD)
+        self.skill_files = support or None
         self.workers = workers
         self.timeout = int(timeout)
         self.analyst_workers = analyst_workers
@@ -89,18 +106,61 @@ class SkillEvalAdapter(EnvAdapter):
 
     def rollout(self, env_manager, skill_content: str, out_dir: str, **kwargs) -> list[dict]:
         items: list[dict] = env_manager
+        skill_md, skill_docs = self._split_state(skill_content)
         rollout_results = run_batch(
             items,
-            skill_content,
+            skill_md,
             out_dir,
             workers=self.workers,
             timeout=self.timeout,
             model=_llm.TARGET_DEPLOYMENT,
             skill_files=self.skill_files,
+            skill_docs=skill_docs,
         )
         results = merge_scores(items, rollout_results, judge)
         self._persist_trajectories(items, results, out_dir)
         return results
+
+    # ── Multi-doc bundle state ────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_trainable(trainable_files: list[str] | str | None) -> list[str]:
+        if not trainable_files:
+            return []
+        raw = (trainable_files.split(",") if isinstance(trainable_files, str)
+               else list(trainable_files))
+        rels = []
+        for entry in raw:
+            rel = normalize_rel_path(entry)
+            if rel == SKILL_MD:
+                raise ValueError("SKILL.md is always trainable; do not list it in trainable_files")
+            if rel not in rels:
+                rels.append(rel)
+        return rels
+
+    @staticmethod
+    def _read_seed(skill_dir: str, rel: str) -> str:
+        path = os.path.join(skill_dir, rel)
+        if not os.path.isfile(path):
+            raise ValueError(f"trainable file not found in skill_dir: {path}")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _split_state(self, skill_content: str) -> tuple[str, dict[str, str] | None]:
+        """Resolve the trainer's state string into (SKILL.md, trainable docs).
+
+        Without trainable_files the state IS SKILL.md. With them it is a
+        bundle; a section the optimizer mangled or dropped falls back to the
+        seed copy — the rollout always sees a complete file set, and the gate
+        judges whatever the candidate actually produced.
+        """
+        if not self.trainable_files:
+            return skill_content, None
+        docs = split_bundle(skill_content, allowed=self.trainable_files)
+        skill_md = docs.get(SKILL_MD) or self._seed_skill_md
+        skill_docs = {rel: docs.get(rel, self._seed_docs[rel])
+                      for rel in self.trainable_files}
+        return skill_md, skill_docs
 
     def _persist_trajectories(self, items: list[dict], results: list[dict], out_dir: str) -> None:
         """Write predictions/<id>/conversation.json + enrich results for reflection.

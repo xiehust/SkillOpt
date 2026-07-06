@@ -793,3 +793,152 @@ class TestArtifactsExcerpts:
         merge_scores([item], [rollout], fake_judge)
         assert "STATUS: OK" in seen["listing"]
         assert "seeded input" not in seen["listing"]
+
+
+# ── bundle codec + trainable_files (multi-doc skill training) ──────────────
+from skillopt.envs.skilleval import bundle as bundle_mod  # noqa: E402
+from skillopt.envs.skilleval.bundle import build_bundle, is_bundle, split_bundle  # noqa: E402
+
+
+class TestBundleCodec:
+    def test_round_trip_and_skill_md_last(self) -> None:
+        text = build_bundle("# skill", [("references/a.md", "AAA"), ("references/b.md", "BBB")])
+        assert text.rstrip().endswith("# skill")
+        assert text.index("references/a.md") < text.index("references/b.md") < text.index("SKILL.md")
+        docs = split_bundle(text)
+        assert docs == {"references/a.md": "AAA", "references/b.md": "BBB", "SKILL.md": "# skill"}
+
+    def test_no_headers_means_single_doc_skill(self) -> None:
+        assert split_bundle("# plain skill") == {"SKILL.md": "# plain skill"}
+        assert not is_bundle("# plain skill")
+        assert is_bundle(build_bundle("# s", []))
+
+    def test_leading_text_attaches_to_first_section(self) -> None:
+        text = "stray edit\n" + build_bundle("# skill", [("a.md", "AAA")])
+        docs = split_bundle(text)
+        assert docs["a.md"] == "stray edit\nAAA"
+        assert docs["SKILL.md"] == "# skill"
+
+    def test_sections_outside_whitelist_are_dropped(self) -> None:
+        text = build_bundle("# skill", [("a.md", "AAA"), ("evil.md", "EEE")])
+        docs = split_bundle(text, allowed=["a.md"])
+        assert set(docs) == {"a.md", "SKILL.md"}
+
+    def test_unsafe_paths_are_dropped_or_rejected(self) -> None:
+        docs = split_bundle("<!-- FILE: ../escape.md -->\nX\n<!-- FILE: SKILL.md -->\n# s")
+        assert set(docs) == {"SKILL.md"}
+        with pytest.raises(ValueError):
+            build_bundle("# s", [("/abs/path.md", "X")])
+        with pytest.raises(ValueError):
+            build_bundle("# s", [("SKILL.md", "X")])
+
+    def test_repeated_path_keeps_last(self) -> None:
+        text = ("<!-- FILE: a.md -->\nold\n<!-- FILE: a.md -->\nnew\n"
+                "<!-- FILE: SKILL.md -->\n# s")
+        assert split_bundle(text)["a.md"] == "new"
+
+    def test_cli_build_and_split_round_trip(self, tmp_path, monkeypatch, capsys) -> None:
+        skill = _make_skill_dir(tmp_path)
+        out_bundle = tmp_path / "seed.md"
+        monkeypatch.setattr("sys.argv", ["bundle", "build", str(skill),
+                                         "--files", "notes.md", "--out", str(out_bundle)])
+        bundle_mod.main()
+        assert "notes.md" in out_bundle.read_text(encoding="utf-8")
+        out_dir = tmp_path / "deploy"
+        monkeypatch.setattr("sys.argv", ["bundle", "split", str(out_bundle),
+                                         "--skill_dir", str(skill), "--out_dir", str(out_dir)])
+        bundle_mod.main()
+        assert (out_dir / "SKILL.md").read_text(encoding="utf-8").strip() == "# skill"
+        assert (out_dir / "notes.md").read_text(encoding="utf-8").strip() == "notes"
+        assert (out_dir / "scripts" / "run.py").is_file()  # frozen file copied
+
+
+class TestRunBatchSkillDocs:
+    def test_skill_docs_written_into_install_dir(self, tmp_path, monkeypatch) -> None:
+        prepared = []
+        monkeypatch.setattr(rollout_mod, "prepare_workspace",
+                            lambda **kw: prepared.append(kw) or ("", ""))
+        monkeypatch.setattr(rollout_mod, "run_claude_code_exec", lambda **kw: ("ok", "raw"))
+        items = [_valid_item("t1", files={"data.csv": "a,b"})]
+        run_batch(items, "# skill", str(tmp_path),
+                  skill_docs={"references/tpl.md": "TPL"})
+        extra = prepared[0]["extra_files"]
+        assert extra["data.csv"] == "a,b"
+        key = os.path.join(".agents", "skills", "skillopt-target", "references", "tpl.md")
+        assert extra[key] == "TPL"
+
+
+class TestSkillEvalAdapterTrainableFiles:
+    def _skill_dir(self, tmp_path):
+        skill = tmp_path / "mskill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "scripts").mkdir()
+        (skill / "SKILL.md").write_text("# seed skill", encoding="utf-8")
+        (skill / "references" / "tpl.md").write_text("seed template", encoding="utf-8")
+        (skill / "scripts" / "run.py").write_text("print()", encoding="utf-8")
+        return skill
+
+    def _adapter(self, tmp_path):
+        a = SkillEvalAdapter(
+            split_dir=_make_split_dir(tmp_path), split_mode="split_dir",
+            skill_dir=str(self._skill_dir(tmp_path)),
+            trainable_files=["references/tpl.md"],
+        )
+        a.setup({})
+        return a
+
+    def test_trainable_excluded_from_frozen_support(self, tmp_path) -> None:
+        a = self._adapter(tmp_path)
+        rels = [rel for _, rel in (a.skill_files or [])]
+        assert os.path.join("scripts", "run.py") in rels
+        assert "references/tpl.md" not in [r.replace(os.sep, "/") for r in rels]
+
+    def test_rollout_splits_bundle_into_skill_md_and_docs(self, tmp_path, monkeypatch) -> None:
+        a = self._adapter(tmp_path)
+        items = a.build_train_env(batch_size=2, seed=1)
+        captured = {}
+
+        def fake_run_batch(batch_items, skill_content, out_dir, **kw):
+            captured["skill_md"] = skill_content
+            captured.update(kw)
+            return [{"id": it["id"], "task_type": "default", "response": "r",
+                     "duration_s": 0.1, "work_dir": "/nx"} for it in batch_items]
+
+        monkeypatch.setattr(adapter_mod, "run_batch", fake_run_batch)
+        monkeypatch.setattr(adapter_mod, "judge",
+                            lambda item, response, listing: {"id": item["id"], "hard": 1, "soft": 1.0})
+        state = build_bundle("# evolved skill", [("references/tpl.md", "evolved template")])
+        a.rollout(items, state, str(tmp_path / "out"))
+        assert captured["skill_md"] == "# evolved skill"
+        assert captured["skill_docs"] == {"references/tpl.md": "evolved template"}
+
+    def test_mangled_section_falls_back_to_seed(self, tmp_path) -> None:
+        a = self._adapter(tmp_path)
+        # optimizer destroyed the template header: section vanishes from parse
+        state = "<!-- FILE: SKILL.md -->\n# evolved skill"
+        skill_md, docs = a._split_state(state)
+        assert skill_md == "# evolved skill"
+        assert docs == {"references/tpl.md": "seed template"}
+
+    def test_without_trainable_files_state_is_skill_md(self, tmp_path) -> None:
+        a = SkillEvalAdapter(split_dir=_make_split_dir(tmp_path), split_mode="split_dir")
+        assert a._split_state("# plain") == ("# plain", None)
+
+    def test_validation_fails_fast(self, tmp_path) -> None:
+        split_dir = _make_split_dir(tmp_path)
+        skill = self._skill_dir(tmp_path)
+        with pytest.raises(ValueError, match="skill_dir"):
+            SkillEvalAdapter(split_dir=split_dir, split_mode="split_dir",
+                             trainable_files=["a.md"])
+        with pytest.raises(ValueError, match="not found"):
+            SkillEvalAdapter(split_dir=split_dir, split_mode="split_dir",
+                             skill_dir=str(skill), trainable_files=["references/nx.md"])
+        with pytest.raises(ValueError, match="SKILL.md"):
+            SkillEvalAdapter(split_dir=split_dir, split_mode="split_dir",
+                             skill_dir=str(skill), trainable_files=["SKILL.md"])
+
+    def test_trainable_files_accepts_comma_string(self, tmp_path) -> None:
+        skill = self._skill_dir(tmp_path)
+        a = SkillEvalAdapter(split_dir=_make_split_dir(tmp_path), split_mode="split_dir",
+                             skill_dir=str(skill), trainable_files="references/tpl.md")
+        assert a.trainable_files == ["references/tpl.md"]

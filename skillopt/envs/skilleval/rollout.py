@@ -61,6 +61,7 @@ def _rollout_one(
     timeout: int,
     model: str,
     skill_files: list[tuple[str, str]] | None = None,
+    skill_docs: dict[str, str] | None = None,
 ) -> dict:
     work_dir = os.path.join(out_root, "rollouts", item["id"])
     result = {
@@ -76,11 +77,14 @@ def _rollout_one(
             (src, os.path.join(SKILL_INSTALL_DIR, rel_dst))
             for src, rel_dst in (skill_files or [])
         ]
+        extra_files = dict(item.get("files") or {})
+        for rel_dst, content in (skill_docs or {}).items():
+            extra_files[os.path.join(SKILL_INSTALL_DIR, rel_dst)] = content
         prepare_workspace(
             work_dir=work_dir,
             skill_md=skill_content,
             task_text=item["question"],
-            extra_files=item.get("files") or None,
+            extra_files=extra_files or None,
             copy_files=copy_files or None,
         )
         # Artifact-producing tasks are the norm in skill evaluation: allow file
@@ -111,6 +115,7 @@ def run_batch(
     timeout: int = 600,
     model: str = "",
     skill_files: list[tuple[str, str]] | None = None,
+    skill_docs: dict[str, str] | None = None,
 ) -> list[dict]:
     """Roll out every task in *items* under *skill_content*, input order preserved.
 
@@ -118,6 +123,10 @@ def run_batch(
     ``(absolute src, path relative to the skill dir)`` pairs; they are copied
     into each work_dir under ``.agents/skills/skillopt-target/`` so relative
     references (scripts/, references/, ...) keep resolving.
+
+    *skill_docs* carries **trainable** documents as ``{rel_path: content}``
+    (already split out of a bundle by the caller); they are written into the
+    same install dir, taking the place of a frozen copy.
     """
     os.makedirs(out_root, exist_ok=True)
     if not items:
@@ -134,6 +143,7 @@ def run_batch(
                 timeout=timeout,
                 model=model,
                 skill_files=skill_files,
+                skill_docs=skill_docs,
             )
             for item in items
         ]
